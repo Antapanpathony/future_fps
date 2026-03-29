@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Laser FPS</title>
+    <!-- Premium Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="scope-overlay">
+      <div class="scope-crosshair h"></div>
+      <div class="scope-crosshair v"></div>
+    </div>
+    <!-- UI Overlay container -->
+    <div id="ui-layer">
+      <div id="crosshair">
+        <div class="crosshair-dot"></div>
+        <div class="crosshair-line h-line"></div>
+        <div class="crosshair-line v-line"></div>
+      </div>
+      <div id="hud-top-left">
+        <div class="hud-label">SCORE</div>
+        <div class="hud-value" id="score-val">0</div>
+      </div>
+      <div id="hud-bottom-left">
+        <div class="hud-label">SYSTEM INTEGRITY</div>
+        <div class="hud-value health-val"><span id="health-val">100</span>%</div>
+        <div class="health-bar-container"><div id="health-bar-fill"></div></div>
+      </div>
+      <div id="hud-bottom-right">
+        <div class="hud-label">ACTIVE WEAPON</div>
+        <div class="hud-value" id="weapon-val">Laser Pistol</div>
+      </div>
+    </div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
