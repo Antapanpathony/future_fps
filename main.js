@@ -53,7 +53,7 @@ instructions.innerHTML = `
   <h1 class="menu-title">PRIMAL SATELLITE</h1>
   <div class="menu-subtitle">
     [W A S D] MOVEMENT &nbsp;&nbsp;|&nbsp;&nbsp; [MOUSE] LOOK &nbsp;&nbsp;|&nbsp;&nbsp; [L-CLICK] FIRE<br>
-    [1 2 3] WEAPON SYSTEMS &nbsp;&nbsp;|&nbsp;&nbsp; [R-CLICK] ADS &nbsp;&nbsp;|&nbsp;&nbsp; [SPACE] JUMP
+    [1-5] WEAPONS &nbsp;&nbsp;|&nbsp;&nbsp; [R-CLICK] ADS &nbsp;&nbsp;|&nbsp;&nbsp; [SPACE] JUMP
   </div>
   <h3 style="color: cyan; text-align: center; margin-bottom: 10px;">SELECT ENVIRONMENT</h3>
   <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px;" id="map-select">
@@ -105,6 +105,24 @@ controls.addEventListener('unlock', () => {
   gameState.isPaused = true;
 });
 scene.add(controls.getObject());
+
+window.forceStart = function(map, mode) {
+  currentMap = map; currentGameMode = mode;
+  document.getElementById('blocker').style.display = 'none';
+  if (!hasStarted) {
+    buildEnvironment(currentMap); spawnEntities(currentGameMode);
+    hasStarted = true;
+    window.gameAgents = agents;
+    setInterval(() => {
+       const positions = agents.map(a => `T${a.team} Z:${a.mesh.position.z.toFixed(1)} Y:${a.mesh.position.y.toFixed(1)} X:${a.mesh.position.x.toFixed(1)}`);
+       console.log('AI POSITIONS:', positions.join(' | '));
+    }, 2000);
+  }
+  gameState.isPaused = false;
+  // Position camera to observe stairs
+  camera.position.set(20, 15, 60);
+  camera.lookAt(0, 5, 80);
+};
 
 // ---- Environment ----
 const environmentGroup = new THREE.Group();
@@ -176,13 +194,67 @@ function buildEnvironment(mapType) {
   environmentGroup.add(floor);
 
   // Map specifics
+  
+  // Add universal physical invisible bounds to all maps so AI natively detects them via raycasting
+  const boundVal = 150;
+  const boundThick = 10;
+  const boundMat = new THREE.MeshBasicMaterial({ visible: false }); // invisible physics barrier
+  
+  const walls = [
+     { w: 320, h: 100, d: boundThick, x: 0, z: boundVal },
+     { w: 320, h: 100, d: boundThick, x: 0, z: -boundVal },
+     { w: boundThick, h: 100, d: 320, x: boundVal, z: 0 },
+     { w: boundThick, h: 100, d: 320, x: -boundVal, z: 0 }
+  ];
+  walls.forEach(b => {
+     const wallMesh = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d), boundMat);
+     wallMesh.position.set(b.x, b.h/2, b.z);
+     wallMesh.userData.isSolid = true;
+     environmentGroup.add(wallMesh);
+  });
+
   if (mapType === 'grid') {
     const gridHelper = new THREE.GridHelper(300, 150, 0x00ffff, 0x002244);
     gridHelper.position.y = 0.05;
     gridHelper.material.transparent = true;
     gridHelper.material.opacity = 0.3;
     environmentGroup.add(gridHelper);
-  } else if (mapType === 'city') {
+
+    // Dynamic Fog: Dense for flatter maps to prevent cross-map sniping
+    scene.fog.density = 0.025;
+
+    // Add Energy Barricades for tactical cover
+    const energyMat = new THREE.MeshStandardMaterial({ 
+      color: 0x0088ff, emissive: 0x0088ff, emissiveIntensity: 0.5, transparent: true, opacity: 0.7 
+    });
+    for (let i = 0; i < 20; i++) {
+        const boxGeo = new THREE.BoxGeometry(4, 5, 4);
+        const barricade = new THREE.Mesh(boxGeo, energyMat);
+        barricade.position.set((Math.random()-0.5)*260, 2.5, (Math.random()-0.5)*260);
+        barricade.userData.isSolid = true;
+        environmentGroup.add(barricade);
+    }
+  } else if (mapType === 'hills') {
+    scene.fog.density = 0.022; // Slightly clearer but still tactical
+
+    // Add Tactical Boulders
+    const rockMat = new THREE.MeshStandardMaterial({ color: 0x4a1a00, roughness: 1.0 });
+    for (let i = 0; i < 15; i++) {
+        const rad = 3 + Math.random() * 4;
+        const rockGeo = new THREE.SphereGeometry(rad, 8, 8);
+        const rock = new THREE.Mesh(rockGeo, rockMat);
+        const rx = (Math.random()-0.5)*260;
+        const rz = (Math.random()-0.5)*260;
+        const ry = Math.sin(rx * 0.05) * Math.cos(rz * 0.05) * 6; // align with hills
+        rock.position.set(rx, ry + rad/2, rz);
+        rock.userData.isSolid = true;
+        environmentGroup.add(rock);
+    }
+  } else {
+    scene.fog.density = 0.015; // Standard for cities/nests
+  }
+
+  if (mapType === 'city') {
     const boxMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.6, roughness: 0.8 });
     const blockSize = 40;
     const streetWidth = 15;
@@ -214,57 +286,45 @@ function buildEnvironment(mapType) {
        }
     }
   } else if (mapType === 'nest') {
-    const matTower = new THREE.MeshStandardMaterial({ color: 0x112233, metalness: 0.8, roughness: 0.2 });
+    const matTower = new THREE.MeshStandardMaterial({ color: 0x112233, metalness: 0.8, roughness: 0.2, emissive: 0x001133, emissiveIntensity: 0.3 });
+    const matStep = new THREE.MeshStandardMaterial({ color: 0x223344, metalness: 0.7, roughness: 0.3 });
     const matCQB = new THREE.MeshStandardMaterial({ color: 0x442222, metalness: 0.5, roughness: 0.6 });
-    
-    // Tower 1 (North)
-    for (let i = 0; i < 6; i++) {
-       const w = 40 - (i * 6); 
-       const y = i * 4 + 2;   
-       const boxGeo = new THREE.BoxGeometry(w, 4, w);
-       const layer = new THREE.Mesh(boxGeo, matTower);
-       layer.position.set(0, y, -100); 
-       layer.userData.isSolid = true;
-       layer.receiveShadow = true;
-       layer.castShadow = true;
-       environmentGroup.add(layer);
-    }
-    // Ladder North
-    for (let i = 0; i < 12; i++) {
-       const stepGeom = new THREE.BoxGeometry(6, 2, 6);
-       const step = new THREE.Mesh(stepGeom, matTower);
-       step.position.set(0, (i*2)+1, -120 + (i*1.5)); 
-       step.userData.isSolid = true;
-       environmentGroup.add(step);
-    }
 
-    // Tower 2 (South)
-    for (let i = 0; i < 6; i++) {
-       const w = 40 - (i * 6); 
-       const y = i * 4 + 2;   
-       const boxGeo = new THREE.BoxGeometry(w, 4, w);
-       const layer = new THREE.Mesh(boxGeo, matTower);
-       layer.position.set(0, y, 100); 
-       layer.userData.isSolid = true;
-       layer.receiveShadow = true;
-       layer.castShadow = true;
-       environmentGroup.add(layer);
-    }
-    // Ladder South
-    for (let i = 0; i < 12; i++) {
-       const stepGeom = new THREE.BoxGeometry(6, 2, 6);
-       const step = new THREE.Mesh(stepGeom, matTower);
-       step.position.set(0, (i*2)+1, 120 - (i*1.5)); 
-       step.userData.isSolid = true;
-       environmentGroup.add(step);
-    }
+    // Build a tower at a given Z origin
+    function buildTower(zOrigin) {
+       // Stepped fortress: 24 tiers × 1u, front face recedes 1u per tier
+       // The tower IS the staircase — no separate stairs needed, no clipping possible
+       const tierCount = 24;
+       const tierH = 1;
+       const tW = 20;
+       const backZ = zOrigin + (zOrigin > 0 ? 10 : -10);
+       const maxDepth = 34;
 
-    // CQB Zone (Center)
-    for(let i=0; i<30; i++) {
-       const boxGeo = new THREE.BoxGeometry(6, 4 + Math.random()*6, 6);
+       for (let i = 0; i < tierCount; i++) {
+          const depth = maxDepth - i;
+          const y = i * tierH + tierH / 2;
+          const frontZ = zOrigin > 0 ? backZ - depth : backZ + depth;
+          const centerZ = (backZ + frontZ) / 2;
+          const boxGeo = new THREE.BoxGeometry(tW, tierH, depth);
+          const layer = new THREE.Mesh(boxGeo, matTower);
+          layer.position.set(0, y, centerZ);
+          layer.userData.isSolid = true;
+          layer.receiveShadow = true;
+          layer.castShadow = true;
+          environmentGroup.add(layer);
+       }
+     }
+
+    buildTower(-100); // North tower
+    buildTower(100);  // South tower
+
+    // CQB Zone (Center) - dense cover
+    for (let i = 0; i < 30; i++) {
+       const bw = 6 + Math.random() * 6;
+       const bh = 3 + Math.random() * 5;
+       const boxGeo = new THREE.BoxGeometry(bw, bh, bw);
        const cover = new THREE.Mesh(boxGeo, matCQB);
-       cover.position.set((Math.random()-0.5)*80, 0, (Math.random()-0.5)*60);
-       cover.position.y += cover.geometry.parameters.height / 2;
+       cover.position.set((Math.random()-0.5)*80, bh/2, (Math.random()-0.5)*60);
        cover.userData.isSolid = true;
        cover.castShadow = true;
        cover.receiveShadow = true;
@@ -272,31 +332,31 @@ function buildEnvironment(mapType) {
     }
   }
 
-  // Generate Horizontal AABB Colliders
+  // Generate Horizontal AABB Colliders (all solid non-plane meshes)
   collidableBoxes.length = 0;
-  environmentGroup.children.forEach(child => {
-     if (child.userData && child.userData.isSolid && child.geometry.type !== 'PlaneGeometry') {
-        child.updateMatrixWorld();
+  environmentGroup.traverse(child => {
+     if (child.isMesh && child.userData && child.userData.isSolid && child.geometry.type !== 'PlaneGeometry') {
+        child.updateMatrixWorld(true);
         collidableBoxes.push(new THREE.Box3().setFromObject(child));
      }
   });
 }
 
 // Lighting
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.1); 
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); // Boosted so all maps are visible
 scene.add(ambientLight);
 
 // Hemisphere light for better reflections
-const hemiLight = new THREE.HemisphereLight(0x00f0ff, 0xff0055, 0.3);
+const hemiLight = new THREE.HemisphereLight(0x00f0ff, 0xff0055, 0.5);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-dirLight.position.set(20, 40, 20);
+const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+dirLight.position.set(30, 80, 30);
 dirLight.castShadow = true;
-dirLight.shadow.camera.top = 50;
-dirLight.shadow.camera.bottom = -50;
-dirLight.shadow.camera.left = -50;
-dirLight.shadow.camera.right = 50;
+dirLight.shadow.camera.top = 200;    // Expanded to cover all maps
+dirLight.shadow.camera.bottom = -200;
+dirLight.shadow.camera.left = -200;
+dirLight.shadow.camera.right = 200;
 dirLight.shadow.mapSize.width = 2048;
 dirLight.shadow.mapSize.height = 2048;
 scene.add(dirLight);
@@ -305,8 +365,8 @@ const weapons = {
   pistol: {
     name: 'Laser Pistol',
     color: 0x00ffff,
-    fireRate: 250, 
-    damage: 25,    
+    fireRate: 200, // Faster
+    damage: 30,    // Buff
     lastFired: 0,
     rays: 1,
     spread: 0,
@@ -315,8 +375,8 @@ const weapons = {
   rifle: {
     name: 'Plasma Auto-Rifle',
     color: 0xff00ff,
-    fireRate: 100, 
-    damage: 12,
+    fireRate: 90,  // Faster
+    damage: 15,    // Buff
     lastFired: 0,
     rays: 1,
     spread: 0.005, 
@@ -325,24 +385,35 @@ const weapons = {
   shotgun: {
     name: 'Scatter Gun',
     color: 0xffaa00,
-    fireRate: 700, 
-    damage: 6, // 15 * 6 = 90 max damage (no longer a guaranteed 1-hit)
+    fireRate: 600, 
+    damage: 8,     // Buff
     lastFired: 0,
     rays: 15,      
-    spread: 0.10, // Slightly wider to require closer range for full damage
+    spread: 0.10, 
     zoomFov: 65,
     piercing: false
   },
   sniper: {
     name: 'Rail-Sniper',
     color: 0x00ff00,
-    fireRate: 1500, 
-    damage: 80, // Heavy damage but leaves you with 20 HP
+    fireRate: 1200, 
+    damage: 65,    // Nerf (Two-shot kills mostly)
     lastFired: 0,
     rays: 1,
     spread: 0,
     zoomFov: 15,
-    piercing: true
+    piercing: false
+  },
+  launcher: {
+    name: 'Grenade Launcher',
+    color: 0xffaa00,
+    fireRate: 800,
+    damage: 80,
+    lastFired: 0,
+    isProjectile: true,
+    blastRadius: 15,
+    speed: 40,
+    zoomFov: 60
   }
 };
 let currentWeapon = weapons.pistol;
@@ -417,8 +488,10 @@ function switchWeapon(key) {
 const raycaster = new THREE.Raycaster();
 const centerVector = new THREE.Vector2(0, 0);
 
-// Laser array
+// Projectile and Laser arrays
 const lasers = [];
+const activeProjectiles = [];
+const explosions = [];
 
 let isMouseDown = false;
 let isADS = false;
@@ -445,10 +518,56 @@ function shoot() {
   // Add recoil animation
   gunGroup.rotation.x = Math.max(gunGroup.rotation.x + 0.1, 0.3);
 
+  if (currentWeapon.isProjectile) {
+    const pos = new THREE.Vector3();
+    camera.getWorldPosition(pos);
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    
+    // Offset from camera to represent gun barrel
+    pos.add(dir.clone().multiplyScalar(0.6));
+    pos.y -= 0.1;
+
+    const projGeo = new THREE.SphereGeometry(0.15, 8, 8);
+    const projColor = 0x00ffff; // Allies
+    const projMat = new THREE.MeshStandardMaterial({ 
+       color: projColor, 
+       emissive: projColor, 
+       emissiveIntensity: 1 
+    });
+    const mesh = new THREE.Mesh(projGeo, projMat);
+    mesh.position.copy(pos);
+    scene.add(mesh);
+
+    const velocity = dir.clone().multiplyScalar(currentWeapon.speed);
+    velocity.y += 5; // Initial upward lob
+
+    activeProjectiles.push({
+       mesh,
+       velocity,
+       team: 0, // Player team
+       owner: camera, // Player owner
+       damage: currentWeapon.damage,
+       blastRadius: currentWeapon.blastRadius,
+       born: now,
+       bounces: 0,
+       fuse: 2500 // 2.5s fuse
+    });
+    return;
+  }
+
   for (let r = 0; r < currentWeapon.rays; r++) {
     const dir = new THREE.Vector3(0, 0, -1);
-    dir.x += (Math.random() - 0.5) * currentWeapon.spread;
-    dir.y += (Math.random() - 0.5) * currentWeapon.spread;
+    
+    // Accuracy Penalty for movement (especially for Sniper)
+    let dynamicSpread = currentWeapon.spread;
+    if (currentWeapon.name === 'Rail-Sniper') {
+      const moveSpeed = velocity.length();
+      if (moveSpeed > 10) dynamicSpread += 0.15; // Major penalty for strafe-sniping
+    }
+
+    dir.x += (Math.random() - 0.5) * dynamicSpread;
+    dir.y += (Math.random() - 0.5) * dynamicSpread;
     dir.applyQuaternion(camera.quaternion).normalize();
     
     raycaster.set(camera.position, dir);
@@ -575,50 +694,102 @@ class Agent {
     this.mesh.add(shell);
     this.mesh.add(core);
     this.shell = shell; 
+    this.core = core;
+
+    // Apply Visual Class Differentiation
+    if (this.primaryWeapon === weapons.launcher) {
+       this.mesh.scale.set(1.3, 1.3, 1.3); // Heavy
+       shell.material.color.setHex(0xffaa00);
+       shell.material.emissive.setHex(0xffaa00);
+       core.material.color.setHex(0xff0000);
+       core.material.emissive.setHex(0xff0000);
+    } else if (this.primaryWeapon === weapons.sniper) {
+       this.mesh.scale.set(0.8, 1.2, 0.8); // Slim Sniper
+       shell.material.color.setHex(0x00ff00);
+       shell.material.emissive.setHex(0x00ff00);
+       core.material.color.setHex(0xccff00);
+       core.material.emissive.setHex(0xccff00);
+    } else if (this.primaryWeapon === weapons.shotgun) {
+       this.mesh.scale.set(1.1, 0.9, 1.1); // Bulky Breacher
+       shell.material.color.setHex(0x0088ff);
+       shell.material.emissive.setHex(0x0088ff);
+       core.material.color.setHex(0x00ffff);
+       core.material.emissive.setHex(0x00ffff);
+    }
 
     this.mesh.position.set(x, 2.5, z); 
     
     const lightColor = team === 0 ? 0x0055ff : 0xff0055;
-    const agentLight = new THREE.PointLight(lightColor, 2, 10);
-    this.mesh.add(agentLight);
+    if (this.primaryWeapon === weapons.launcher) {
+       // Stronger light for heavies
+       const agentLight = new THREE.PointLight(0xffaa00, 3, 15);
+       this.mesh.add(agentLight);
+    } else {
+       const agentLight = new THREE.PointLight(lightColor, 2, 10);
+       this.mesh.add(agentLight);
+    }
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     scene.add(this.mesh);
     
-    this.health = 100 * difficultyMult;
-    this.speed = (team === 0 ? 8 : 6) * difficultyMult; 
+    // Buffed health and reduced speed to force a slower, more tactical methodical pace
+    this.health = 200 * difficultyMult;
+    this.speed = (team === 0 ? 4 : 3) * difficultyMult; 
     this.baseDamage = 10 * difficultyMult;
     this.lastFired = 0;
-    this.weapon = weapons.rifle; // Assigned dynamically
+    // Assign a random weapon (now including Sniper and Launcher)
+    const weaponList = Object.values(weapons);
+    this.primaryWeapon = weaponList[Math.floor(Math.random() * weaponList.length)];
+    this.weapon = this.primaryWeapon;
     this.velocityY = 0;
     this.stuckTimer = 0;
     this.stuckDir = new THREE.Vector3();
+    
+    // Proactive behavior state for Sniper Nest (Matched to ramp geometry)
+    this.nestBaseZ = team === 0 ? 76 : -76; 
+    this.nestTargetZ = team === 0 ? 104 : -104; 
   }
 
   update(delta) {
-    // Determine Top Surface Height
-    let agentFloorY = 2; // default
-    const origin = this.mesh.position.clone();
-    origin.y += 100; // start way up
-    const downRay = new THREE.Raycaster(origin, new THREE.Vector3(0, -1, 0));
-    const hits = downRay.intersectObjects(environmentGroup.children, true);
-    for(let i=0; i<hits.length; i++) {
-       if (hits[i].object.userData.isSolid) {
-          agentFloorY = hits[i].point.y + 2; 
-          break;
+    // Floor detection: use AABB overlapping to match horizontal collision perfectly, avoiding ledge/raycast vibration
+    let agentFloorY = 0;
+    const ax = this.mesh.position.x;
+    const az = this.mesh.position.z;
+    const ay = this.mesh.position.y;
+    for (let i = 0; i < collidableBoxes.length; i++) {
+       const box = collidableBoxes[i];
+       if (ax > box.min.x - 0.8 && ax < box.max.x + 0.8 && az > box.min.z - 0.8 && az < box.max.z + 0.8) {
+          if (box.max.y <= ay + 1.0 && box.max.y > agentFloorY) {
+             agentFloorY = box.max.y;
+          }
        }
     }
 
     // Apply Gravity to Agent
     this.velocityY -= 300 * delta; 
     this.mesh.position.y += this.velocityY * delta;
-    if (this.mesh.position.y <= agentFloorY) {
-      this.mesh.position.y = agentFloorY;
+    if (this.mesh.position.y - 2.0 <= agentFloorY) {
+      this.mesh.position.y = agentFloorY + 2.0;
       this.velocityY = Math.max(0, this.velocityY);
     }
 
     let closestHostile = null;
     let minDist = Infinity;
+    let grenadeAvoidance = null;
+    let isSprinting = false;
+
+    // AI Dodge/Scattering logic for Grenades
+    for (let i = 0; i < activeProjectiles.length; i++) {
+       const p = activeProjectiles[i];
+       if (p.team !== this.team) {
+          const distToGrenade = this.mesh.position.distanceTo(p.mesh.position);
+          if (distToGrenade < 20) {
+             grenadeAvoidance = this.mesh.position.clone().sub(p.mesh.position).normalize();
+             isSprinting = true;
+             break;
+          }
+       }
+    }
 
     if (this.team === 1) {
       const pDist = this.mesh.position.distanceTo(camera.position);
@@ -640,15 +811,22 @@ class Agent {
     }
 
     if (closestHostile) {
-      // Smart Weapon Switch
-      if (minDist > 30) this.weapon = weapons.sniper;
-      else if (minDist < 12) this.weapon = weapons.shotgun;
-      else this.weapon = weapons.rifle;
+      // Smart Weapon Switch: Only switch if not a specialized Heavy (Launcher)
+      if (this.primaryWeapon !== weapons.launcher) {
+        if (minDist > 35) this.weapon = weapons.sniper; 
+        else if (minDist < 8) this.weapon = weapons.shotgun;
+        else this.weapon = this.primaryWeapon;
+      } else {
+        // Heavy bots might switch to a sidearm if the enemy is literally on top of them
+        if (minDist < 5) this.weapon = weapons.pistol;
+        else this.weapon = weapons.launcher;
+      }
 
       // Check Line of Sight (LOS)
       let hasLOS = true;
-      const dirToTarget = new THREE.Vector3().subVectors(closestHostile.position, this.mesh.position).normalize();
-      const losRay = new THREE.Raycaster(this.mesh.position, dirToTarget);
+      const eyeLevel = this.mesh.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+      const dirToTarget = new THREE.Vector3().subVectors(closestHostile.position, eyeLevel).normalize();
+      const losRay = new THREE.Raycaster(eyeLevel, dirToTarget);
       const losHits = losRay.intersectObjects(environmentGroup.children, true);
       for (let i = 0; i < losHits.length; i++) {
          if (losHits[i].object.userData.isSolid && losHits[i].distance < minDist) {
@@ -657,15 +835,23 @@ class Agent {
          }
       }
 
-      // Smart Jump - Only if they have LOS
-      if (hasLOS && Math.random() < 0.005 && this.mesh.position.y <= agentFloorY + 0.1) {
-         this.velocityY = 100;
-      }
+      // (No random jumping - causes AI to get stuck bouncing in corners)
 
       // Movement logic
       let currentSpeed = this.speed;
       const isAiming = (this.weapon === weapons.sniper && minDist > 20);
       let isSprinting = false;
+
+      // Heavy Launcher Tactics: Strafe after firing
+      const now = Date.now();
+      let tacticalStrafe = null;
+      if (this.primaryWeapon === weapons.launcher && now - this.lastFired < 2000) {
+         // Perpendicular movement to target
+         tacticalStrafe = new THREE.Vector3().crossVectors(dirToTarget, new THREE.Vector3(0, 1, 0)).normalize();
+         if ((this.mesh.id % 2) === 0) tacticalStrafe.negate();
+         currentSpeed *= 1.5;
+         isSprinting = true;
+      }
 
       // Tactical Sprint - AI sprints if far and out of sight
       if (!hasLOS && minDist > 30) {
@@ -675,25 +861,80 @@ class Agent {
          currentSpeed *= 0.5;
       }
 
-      if (minDist > 8 || !hasLOS) {
+      // Sniper/Heavy Awareness: Sprint if recently hit by high damage
+      if (this.lastHitTime && now - this.lastHitTime < 2000 && this.lastHitDamage > 30) {
+         isSprinting = true;
+         currentSpeed *= 2.0;
+      }
+
+      if (minDist > 8 || !hasLOS || tacticalStrafe) {
         let dir = dirToTarget.clone();
         dir.y = 0;
 
-        if (this.stuckTimer > 0) {
-           this.stuckTimer -= delta;
-           dir.copy(this.stuckDir);
-        } else {
-           // Vector-based Obstacle Avoidance
-           const avoidRay = new THREE.Raycaster(this.mesh.position, dir);
-           const avoidHits = avoidRay.intersectObjects(environmentGroup.children, true);
-           if (avoidHits.length > 0 && avoidHits[0].distance < 4 && avoidHits[0].object.userData.isSolid) {
-              const hitNormal = avoidHits[0].face ? avoidHits[0].face.normal.clone() : new THREE.Vector3(0,0,1);
-              if (avoidHits[0].object.matrixWorld) {
-                 hitNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(avoidHits[0].object.matrixWorld)).normalize();
+       if (tacticalStrafe) {
+          dir.copy(tacticalStrafe);
+       } else if (grenadeAvoidance) {
+          dir.copy(grenadeAvoidance);
+       } else if (this.stuckTimer > 0) {
+          this.stuckTimer -= delta;
+          dir.copy(this.stuckDir);
+       } else {
+           // Proactive vs Reactive Pathing
+           let useProactivePathing = false;
+           
+           if (currentMap === 'nest') {
+              const onRoof = this.mesh.position.y > 20;
+              
+              if (!onRoof) {
+                 useProactivePathing = true;
+                 // Detailed Stair Logic: move to x=targetX first, then push Z-axis
+                 const needsBase = (this.team === 0) ? (this.mesh.position.z < 62) : (this.mesh.position.z > -62);
+                 const targetX = (this.mesh.id % 5 - 2) * 4; // Spread across roof width
+                 if (Math.abs(this.mesh.position.x - targetX) > 4) {
+                    dir.set(targetX - this.mesh.position.x, 0, 0).normalize();
+                 } else if (needsBase) {
+                    dir.set(targetX - this.mesh.position.x, 0, this.nestBaseZ - this.mesh.position.z).normalize();
+                 } else {
+                    dir.set(targetX - this.mesh.position.x, 0, this.nestTargetZ - this.mesh.position.z).normalize();
+                 }
+              } else if (onRoof) {
+                 // Roof behavior: Strafe slightly but stay near targetZ
+                 useProactivePathing = true;
+                 const strafe = Math.sin(Date.now() * 0.002 + this.mesh.position.x) * 5;
+                 const targetX = (this.mesh.id % 5 - 2) * 4;
+                 dir.set(targetX + strafe - this.mesh.position.x, 0, this.nestTargetZ - this.mesh.position.z).normalize();
+                 if (dir.length() < 0.1) dir.set(0,0,0);
               }
-              hitNormal.y = 0; hitNormal.normalize();
-              dir.crossVectors(hitNormal, new THREE.Vector3(0,1,0)).normalize();
-              if (dir.dot(dirToTarget) < 0) dir.negate();
+           }
+
+           if (!useProactivePathing) {
+              // Reactive: Standard LOS/Stuck Pathing
+              if (currentMap === 'nest' && closestHostile && closestHostile.position.y > 10 && !hasLOS) {
+                 // Target is high up (likely on a tower)
+                 const towerZ = closestHostile.position.z < 0 ? -110 : 110;
+                 const stairZBase = closestHostile.position.z < 0 ? -50 : 50;
+                 const needsStairBase = (closestHostile.position.z < 0) ? (this.mesh.position.z > -45) : (this.mesh.position.z < 45);
+                 if (Math.abs(this.mesh.position.x) > 4) {
+                    dir.set(0 - this.mesh.position.x, 0, 0).normalize();
+                 } else if (needsStairBase) {
+                   dir.set(0 - this.mesh.position.x, 0, stairZBase - this.mesh.position.z).normalize();
+                 } else {
+                   dir.set(0 - this.mesh.position.x, 0, towerZ - this.mesh.position.z).normalize();
+                 }
+              } else {
+                 // Vector-based Obstacle Avoidance
+                 const avoidRay = new THREE.Raycaster(this.mesh.position, dir);
+                 const avoidHits = avoidRay.intersectObjects(environmentGroup.children, true);
+                 if (avoidHits.length > 0 && avoidHits[0].distance < 4 && avoidHits[0].object.userData.isSolid) {
+                    const hitNormal = avoidHits[0].face ? avoidHits[0].face.normal.clone() : new THREE.Vector3(0,0,1);
+                    if (avoidHits[0].object.matrixWorld) {
+                       hitNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(avoidHits[0].object.matrixWorld)).normalize();
+                    }
+                    hitNormal.y = 0; hitNormal.normalize();
+                    dir.crossVectors(hitNormal, new THREE.Vector3(0,1,0)).normalize();
+                    if (dir.dot(dirToTarget) < 0) dir.negate();
+                 }
+              }
            }
         }
 
@@ -703,51 +944,128 @@ class Agent {
         const pMinY = this.mesh.position.y - 1.0;
         const pMaxY = this.mesh.position.y + 1.5;
 
-        // Step X
+        // Step X — step-up: climb tier faces within threshold
+        let xStuck = false;
         this.mesh.position.x += dir.x * currentSpeed * delta;
+        let agentFeet = this.mesh.position.y - 2.0;
         for (let i = 0; i < collidableBoxes.length; i++) {
            const box = collidableBoxes[i];
-           if (pMinY < box.max.y && pMaxY > box.min.y) {
+           if (agentFeet >= box.max.y - 0.05) continue;
+           if (this.mesh.position.y + 1.5 > box.min.y) {
                if (this.mesh.position.x > box.min.x-0.8 && this.mesh.position.x < box.max.x+0.8 && oldZ > box.min.z-0.8 && oldZ < box.max.z+0.8) {
-                   this.mesh.position.x = oldX; break;
+                   const stepH = box.max.y - agentFeet;
+                   if (currentMap === 'nest' && stepH > 0 && stepH <= 2.0) {
+                      this.mesh.position.y = box.max.y + 2; this.velocityY = 0;
+                   } else {
+                      this.mesh.position.x = oldX; xStuck = true;
+                   }
+                   break;
                }
            }
         }
 
-        // Step Z
+        // Entity-Entity X collision (Agent vs Agent)
+        for (let i = 0; i < agents.length; i++) {
+           const other = agents[i];
+           if (other === this || other.health <= 0) continue;
+           const otherMinY = other.mesh.position.y - 2.0;
+           const otherMaxY = other.mesh.position.y + 1.5;
+           if (pMaxY > otherMinY && pMinY < otherMaxY) {
+              if (Math.abs(this.mesh.position.x - other.mesh.position.x) < 1.0 && Math.abs(oldZ - other.mesh.position.z) < 1.0) {
+                 this.mesh.position.x = oldX; xStuck = true; break;
+              }
+           }
+        }
+        
+        // Entity-Entity X collision (Agent vs Player)
+        if (!gameState.isPaused && gameState.health > 0) {
+           const playMinY = camera.position.y - 1.6;
+           const playMaxY = camera.position.y + 0.2;
+           if (pMaxY > playMinY && pMinY < playMaxY) {
+              if (Math.abs(this.mesh.position.x - camera.position.x) < 0.9 && Math.abs(oldZ - camera.position.z) < 0.9) {
+                 this.mesh.position.x = oldX; xStuck = true;
+              }
+           }
+        }
+
+        // Recompute agentFeet after possible X step-up
+        agentFeet = this.mesh.position.y - 2.0;
+
+        // Step Z — same step-up logic
+        let zStuck = false;
         this.mesh.position.z += dir.z * currentSpeed * delta;
         for (let i = 0; i < collidableBoxes.length; i++) {
            const box = collidableBoxes[i];
-           if (pMinY < box.max.y && pMaxY > box.min.y) {
+           if (agentFeet >= box.max.y - 0.05) continue;
+           if (this.mesh.position.y + 1.5 > box.min.y) {
                if (this.mesh.position.x > box.min.x-0.8 && this.mesh.position.x < box.max.x+0.8 && this.mesh.position.z > box.min.z-0.8 && this.mesh.position.z < box.max.z+0.8) {
-                   this.mesh.position.z = oldZ; break;
+                   const stepH = box.max.y - agentFeet;
+                   if (currentMap === 'nest' && stepH > 0 && stepH <= 2.0) {
+                      this.mesh.position.y = box.max.y + 2; this.velocityY = 0;
+                   } else {
+                      this.mesh.position.z = oldZ; zStuck = true;
+                   }
+                   break;
                }
            }
         }
-
-        // Stuck detection
-        if (this.stuckTimer <= 0) {
-           const movedSq = Math.pow(this.mesh.position.x - oldX, 2) + Math.pow(this.mesh.position.z - oldZ, 2);
-           if (movedSq < 0.0001 && currentSpeed > 0) {
-              this.stuckTimer = 1.0; 
-              let bestDir = new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize();
-              for (let a = 0; a < Math.PI*2; a += Math.PI/4) {
-                 const testDir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
-                 const testRay = new THREE.Raycaster(this.mesh.position, testDir);
-                 const hts = testRay.intersectObjects(environmentGroup.children, true);
-                 let blocked = false;
-                 for (let k = 0; k < hts.length; k++) {
-                    if (hts[k].object.userData.isSolid && hts[k].distance < 15) { blocked = true; break; }
-                 }
-                 if (!blocked) { bestDir = testDir; break; }
+        
+        // Entity-Entity Z collision (Agent vs Agent)
+        for (let i = 0; i < agents.length; i++) {
+           const other = agents[i];
+           if (other === this || other.health <= 0) continue;
+           const otherMinY = other.mesh.position.y - 2.0;
+           const otherMaxY = other.mesh.position.y + 1.5;
+           if (pMaxY > otherMinY && pMinY < otherMaxY) {
+              if (Math.abs(this.mesh.position.x - other.mesh.position.x) < 1.0 && Math.abs(this.mesh.position.z - other.mesh.position.z) < 1.0) {
+                 this.mesh.position.z = oldZ; zStuck = true; break;
               }
-              this.stuckDir.copy(bestDir);
+           }
+        }
+        
+        // Entity-Entity Z collision (Agent vs Player)
+        if (!gameState.isPaused && gameState.health > 0) {
+           const playMinY = camera.position.y - 1.6;
+           const playMaxY = camera.position.y + 0.2;
+           if (pMaxY > playMinY && pMinY < playMaxY) {
+              if (Math.abs(this.mesh.position.x - camera.position.x) < 0.9 && Math.abs(this.mesh.position.z - camera.position.z) < 0.9) {
+                 this.mesh.position.z = oldZ; zStuck = true;
+              }
            }
         }
 
-      } else if (hasLOS && !isSprinting) {
+        // (Step-up handles tier climbing; no random jumping needed)
+
+      // Stuck detection
+      if (this.stuckTimer <= 0) {
+         const movedSq = Math.pow(this.mesh.position.x - oldX, 2) + Math.pow(this.mesh.position.z - oldZ, 2);
+         if (movedSq < 0.0001 && currentSpeed > 0) {
+            this.stuckTimer = 1.0; 
+            let bestDir = new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize();
+            for (let a = 0; a < Math.PI*2; a += Math.PI/4) {
+               const testDir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+               const testRay = new THREE.Raycaster(this.mesh.position, testDir);
+               const hts = testRay.intersectObjects(environmentGroup.children, true);
+               let blocked = false;
+               for (let k = 0; k < hts.length; k++) {
+                  // A clearance of 7 units allows the AI to navigate 15-unit wide city streets 
+                  // without detecting walls on both sides and giving up.
+                  if (hts[k].object.userData.isSolid && hts[k].distance < 7) { blocked = true; break; }
+               }
+               if (!blocked) { bestDir = testDir; break; }
+            }
+            this.stuckDir.copy(bestDir);
+         }
+      }
+
+      }
+      
+      // Decoupled Combat Logic: Always attempt to shoot if target is visible and not sprinting
+      if (hasLOS && !isSprinting) {
         const now = Date.now();
-        if (now - this.lastFired > this.weapon.fireRate * (this.team === 0 ? 1 : 1.5)) {
+        // Massively slow down AI fire rates to prevent instant cross-map wipes and enforce a slower pace
+        const rateMult = this.team === 0 ? 3.0 : 3.5; 
+        if (now - this.lastFired > this.weapon.fireRate * rateMult) {
           this.lastFired = now;
           this.shootAt(closestHostile);
         }
@@ -820,13 +1138,50 @@ class Agent {
            }
         }
       }
-      if (Math.random() < 0.002 && this.mesh.position.y <= 2.1) {
-         this.velocityY = 100;
-      }
+      // (No random jumping for allies either)
     }
   }
 
   shootAt(target) {
+    if (this.weapon.isProjectile) {
+       const pos = this.mesh.position.clone();
+       pos.y += 1.5; // From chest level
+       
+       const dir = target.position.clone().sub(pos).normalize();
+       
+       // Add slight randomization to AI grenades
+       dir.x += (Math.random() - 0.5) * 0.1;
+       dir.z += (Math.random() - 0.5) * 0.1;
+       dir.normalize();
+
+       const projGeo = new THREE.SphereGeometry(0.15, 8, 8);
+       const projColor = this.team === 0 ? 0x00ffff : 0xff0000;
+       const projMat = new THREE.MeshStandardMaterial({ 
+          color: projColor, 
+          emissive: projColor, 
+          emissiveIntensity: 1 
+       });
+       const mesh = new THREE.Mesh(projGeo, projMat);
+       mesh.position.copy(pos);
+       scene.add(mesh);
+
+       const velocity = dir.multiplyScalar(this.weapon.speed);
+       velocity.y += 3 + Math.random() * 4; // Randomized lob for AI
+
+       activeProjectiles.push({
+          mesh,
+          velocity,
+          team: this.team,
+          owner: this.mesh,
+          damage: this.weapon.damage,
+          blastRadius: this.weapon.blastRadius,
+          born: Date.now(),
+          bounces: 0,
+          fuse: 2500 
+       });
+       return;
+    }
+
     const laserColor = this.weapon.color;
     
     // Fire weapon rays
@@ -847,24 +1202,35 @@ class Agent {
        scene.add(laser);
        lasers.push({ mesh: laser, born: Date.now() });
 
-       // Damage logic based on target
+       // Damage check — raycast from agent to see if it actually hits the target
        const ray = new THREE.Raycaster();
        const dir = new THREE.Vector3().subVectors(aimPoint, this.mesh.position).normalize();
        ray.set(this.mesh.position, dir);
-       
+
+       // Physical wall-hack prevention: perfectly ensure the laser doesn't clip through an intermediate object
+       let hitWall = false;
+       const envHits = ray.intersectObjects(environmentGroup.children, true);
+       const maxDist = this.mesh.position.distanceTo(aimPoint);
+       for (let i = 0; i < envHits.length; i++) {
+          if (envHits[i].object.userData.isSolid && envHits[i].distance < maxDist) {
+             hitWall = true; break;
+          }
+       }
+
        if (target.isPlayer) {
          const playerBox = new THREE.Box3(
            new THREE.Vector3(camera.position.x - 0.5, camera.position.y - 1.6, camera.position.z - 0.5),
            new THREE.Vector3(camera.position.x + 0.5, camera.position.y + 0.4, camera.position.z + 0.5)
          );
-         if (ray.ray.intersectsBox(playerBox)) {
-            // AI deals 50% damage to players to prevent instantly being aimbotted
+         if (ray.ray.intersectsBox(playerBox) && !hitWall) {
             const finalDamage = (this.weapon.damage * 0.5) * difficultyMult;
             gameState.health -= finalDamage;
          }
        } else {
-          if (aimPoint.distanceTo(target.position) < 2) { 
-             const dead = target.agent.takeDamage(this.weapon.damage * difficultyMult);
+          // Check if any ray intersects the target agent's mesh
+          const hits = ray.intersectObjects(target.agent.mesh.children, true);
+          if ((hits.length > 0 || aimPoint.distanceTo(target.position) < 4) && !hitWall) {
+             const dead = target.agent.takeDamage(this.weapon.damage);
              if (dead) {
                 const index = agents.indexOf(target.agent);
                 if (index > -1) agents.splice(index, 1);
@@ -876,6 +1242,8 @@ class Agent {
 
   takeDamage(amount) {
     this.health -= amount;
+    this.lastHitTime = Date.now();
+    this.lastHitDamage = amount;
     this.shell.material.emissive.setHex(0xffffff);
     setTimeout(() => {
       if(this.shell && this.shell.material) {
@@ -897,7 +1265,6 @@ class Agent {
 }
 
 function spawnEntities(mode) {
-  // Logic from top
   let allyCount = 0; let enemyCount = 0;
   if(mode === 'solo') enemyCount = 5;
   if(mode === '1v1') enemyCount = 1;
@@ -905,17 +1272,71 @@ function spawnEntities(mode) {
   if(mode === '3v3') { allyCount = 2; enemyCount = 3; }
   if(mode === '4v4') { allyCount = 3; enemyCount = 4; }
 
-  // Set player spawn to South edge
-  camera.position.set(0, 1.6, 120); 
-  velocity.set(0,0,0); // reset velocity
-  
-  // Allies spawning near player (South Edge)
-  for(let i=0; i<allyCount; i++){
-    agents.push(new Agent((Math.random()-0.5)*40, 120 + (Math.random()-0.5)*10, 0));
+  // Map-aware spawn positions
+  let playerSpawnX = 0, playerSpawnZ = 0;
+  let allySpreadX = 20, allySpreadZ = 10, allyOffsetZ = 0;
+  let enemySpreadX = 60, enemySpreadZ = 20, enemyOffsetZ = 0;
+
+  if (currentMap === 'city') {
+    playerSpawnZ = 120;
+    allyOffsetZ = 120;
+    enemyOffsetZ = -120;
+    enemySpreadX = 100;
+  } else if (currentMap === 'nest') {
+    // Spawn both teams in the open CQB zone at ground level
+    playerSpawnZ = 50;    // South side of center open zone
+    allyOffsetZ = 50;
+    enemyOffsetZ = -50;   // North side of center open zone
+    allySpreadX = 30;
+    enemySpreadX = 30;
+  } else {
+    // grid / hills: spread across the map
+    playerSpawnZ = 100;
+    allyOffsetZ = 100;
+    enemyOffsetZ = -100;
+    enemySpreadX = 80;
   }
-  // Enemies spawned at opposite edge (North Edge)
-  for(let i=0; i<enemyCount; i++){
-    agents.push(new Agent((Math.random()-0.5)*100, -120 + (Math.random()-0.5)*20, 1));
+
+  camera.position.set(playerSpawnX, 1.6, playerSpawnZ);
+  velocity.set(0, 0, 0);
+
+  for (let i = 0; i < allyCount; i++) {
+    agents.push(new Agent(
+      (Math.random()-0.5) * allySpreadX,
+      allyOffsetZ + (Math.random()-0.5) * allySpreadZ,
+      0
+    ));
+  }
+  for (let i = 0; i < enemyCount; i++) {
+    agents.push(new Agent(
+      (Math.random()-0.5) * enemySpreadX,
+      enemyOffsetZ + (Math.random()-0.5) * enemySpreadZ,
+      1
+    ));
+  }
+
+  // Force at least one "Grenadier" role per team if agents exist
+  let foundAllyGrenadier = false;
+  let foundEnemyGrenadier = false;
+  
+  // In solo mode, the first enemy is ALWAYS a Heavy with a launcher
+  if (mode === 'solo' && agents.length > 0) {
+     agents[0].primaryWeapon = weapons.launcher;
+     agents[0].weapon = weapons.launcher;
+     foundEnemyGrenadier = true;
+  }
+
+  for (let i = 0; i < agents.length; i++) {
+     if (agents[i].team === 0 && !foundAllyGrenadier) {
+        agents[i].primaryWeapon = weapons.launcher;
+        agents[i].weapon = weapons.launcher;
+        foundAllyGrenadier = true;
+     }
+     if (agents[i].team === 1 && !foundEnemyGrenadier) {
+        agents[i].primaryWeapon = weapons.launcher;
+        agents[i].weapon = weapons.launcher;
+        foundEnemyGrenadier = true;
+     }
   }
 }
 
@@ -930,6 +1351,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Digit2') switchWeapon('rifle');
     if (e.code === 'Digit3') switchWeapon('shotgun');
     if (e.code === 'Digit4') switchWeapon('sniper');
+    if (e.code === 'Digit5') switchWeapon('launcher');
     if (e.code === 'Space' && canJump) {
       velocity.y += 100; // Floaty jump speed (lower than 180)
       canJump = false;
@@ -959,19 +1381,6 @@ function animate() {
   camera.updateProjectionMatrix();
 
   if (!gameState.isPaused && controls.isLocked) {
-    // Determine floor height based on Environment
-    let floorHeight = 0;
-    const cOrigin = camera.position.clone();
-    cOrigin.y += 100;
-    const cRay = new THREE.Raycaster(cOrigin, new THREE.Vector3(0, -1, 0));
-    const cHits = cRay.intersectObjects(environmentGroup.children, true);
-    for(let i=0; i<cHits.length; i++) {
-       if (cHits[i].object.userData.isSolid) {
-          floorHeight = cHits[i].point.y;
-          break;
-       }
-    }
-
     // Movement logic with damping
     velocity.x -= velocity.x * 10.0 * delta;
     velocity.z -= velocity.z * 10.0 * delta;
@@ -988,30 +1397,95 @@ function animate() {
     if (mapKeys['KeyW'] || mapKeys['ArrowUp'] || mapKeys['KeyS'] || mapKeys['ArrowDown']) velocity.z -= direction.z * currentSpeed * delta;
     if (mapKeys['KeyA'] || mapKeys['ArrowLeft'] || mapKeys['KeyD'] || mapKeys['ArrowRight']) velocity.x -= direction.x * currentSpeed * delta;
 
-    // Apply Horizontal Collisions with Sliding
+    // Apply Horizontal Collisions (Decoupled axes — prevents teleporting through corners)
     const oldX = camera.position.x;
     const oldZ = camera.position.z;
-    
+    const pMinY = camera.position.y - 1.6; // feet
+    const pMaxY = camera.position.y + 0.2; // head
+
+    // Step X first
+    const maxStepUp = currentMap === 'nest' ? 1.5 : 0.5;
     controls.moveRight(-velocity.x * delta);
-    controls.moveForward(-velocity.z * delta);
-    
     const newX = camera.position.x;
-    const newZ = camera.position.z;
-    const pMinY = camera.position.y - 1.5; // feet
-    const pMaxY = camera.position.y + 0.4; // head
-    
-    let colX = false, colZ = false;
     for (let i = 0; i < collidableBoxes.length; i++) {
-        const box = collidableBoxes[i];
-        if (pMinY < box.max.y && pMaxY > box.min.y) {
-           if (newX > box.min.x - 0.4 && newX < box.max.x + 0.4 && oldZ > box.min.z - 0.4 && oldZ < box.max.z + 0.4) colX = true;
-           if (oldX > box.min.x - 0.4 && oldX < box.max.x + 0.4 && newZ > box.min.z - 0.4 && newZ < box.max.z + 0.4) colZ = true;
-        }
+       const box = collidableBoxes[i];
+       if (pMinY < box.max.y && pMaxY > box.min.y) {
+          if (newX > box.min.x - 0.4 && newX < box.max.x + 0.4 &&
+              oldZ > box.min.z - 0.4 && oldZ < box.max.z + 0.4) {
+             const stepUp = box.max.y - pMinY;
+             if (stepUp > 0 && stepUp <= maxStepUp) {
+                // Valid step, do not block X movement
+             } else {
+                camera.position.x = oldX;
+             }
+             break;
+          }
+       }
     }
     
-    // Slide mechanic: Revert only the blocked axis
-    camera.position.x = colX ? oldX : newX;
-    camera.position.z = colZ ? oldZ : newZ;
+    // Player vs Agent X Collision
+    for (let i = 0; i < agents.length; i++) {
+       const other = agents[i];
+       if (other.health <= 0) continue;
+       const otherMinY = other.mesh.position.y - 1.0;
+       const otherMaxY = other.mesh.position.y + 1.5;
+       if (pMinY < otherMaxY && pMaxY > otherMinY) {
+          if (Math.abs(newX - other.mesh.position.x) < 0.9 && Math.abs(oldZ - other.mesh.position.z) < 0.9) {
+             camera.position.x = oldX; break;
+          }
+       }
+    }
+
+    // Recompute after possible X step-up
+    const pMinY2 = camera.position.y - 1.6;
+    const pMaxY2 = camera.position.y + 0.2;
+
+    // Step Z second
+    controls.moveForward(-velocity.z * delta);
+    const newZ = camera.position.z;
+    for (let i = 0; i < collidableBoxes.length; i++) {
+       const box = collidableBoxes[i];
+       if (pMinY2 < box.max.y && pMaxY2 > box.min.y) {
+          if (camera.position.x > box.min.x - 0.4 && camera.position.x < box.max.x + 0.4 &&
+              newZ > box.min.z - 0.4 && newZ < box.max.z + 0.4) {
+             const stepUp = box.max.y - pMinY2;
+             if (stepUp > 0 && stepUp <= maxStepUp) {
+                // Valid step, do not block Z movement
+             } else {
+                camera.position.z = oldZ;
+             }
+             break;
+          }
+       }
+    }
+    
+    // Player vs Agent Z Collision
+    for (let i = 0; i < agents.length; i++) {
+       const other = agents[i];
+       if (other.health <= 0) continue;
+       const otherMinY = other.mesh.position.y - 1.0;
+       const otherMaxY = other.mesh.position.y + 1.5;
+       if (pMinY2 < otherMaxY && pMaxY2 > otherMinY) {
+          if (Math.abs(camera.position.x - other.mesh.position.x) < 0.9 && Math.abs(newZ - other.mesh.position.z) < 0.9) {
+             camera.position.z = oldZ; break;
+          }
+       }
+    }
+
+    // Now recalculate robust AABB floor overlap AT NEW POSITION
+    let floorHeight = 0;
+    const px = camera.position.x;
+    const pz = camera.position.z;
+    const py = camera.position.y;
+    for (let i = 0; i < collidableBoxes.length; i++) {
+       const box = collidableBoxes[i];
+       if (px > box.min.x - 0.4 && px < box.max.x + 0.4 && pz > box.min.z - 0.4 && pz < box.max.z + 0.4) {
+          // Add +1.0 buffer to strictly capture fast falling player instances
+          if (box.max.y <= py + 1.0 && box.max.y > floorHeight) {
+             floorHeight = box.max.y;
+          }
+       }
+    }
 
     camera.position.y += velocity.y * delta;
 
@@ -1087,6 +1561,9 @@ function animate() {
     }
   }
 
+  updateProjectiles(delta);
+  updateExplosions(delta);
+
   // Update HUD
   document.getElementById('score-val').innerText = gameState.score.toString().padStart(5, '0');
   
@@ -1150,3 +1627,117 @@ window.subagentTestStart = function() {
    // Force lock bypass for animate loop
    controls.isLocked = true;
 };
+function updateProjectiles(delta) {
+  const now = Date.now();
+  for (let i = activeProjectiles.length - 1; i >= 0; i--) {
+    const p = activeProjectiles[i];
+    p.velocity.y -= 30 * delta; 
+    const stepVel = p.velocity.clone().multiplyScalar(delta);
+    p.mesh.position.add(stepVel);
+
+    const ray = new THREE.Raycaster(p.mesh.position, p.velocity.clone().normalize(), 0, stepVel.length() + 0.3);
+    const envHits = ray.intersectObjects(environmentGroup.children, true);
+    
+    if (envHits.length > 0) {
+       // Safety check: ignore collision ONLY if hit object is part of the owner
+       let isOwnerHit = false;
+       if (now - p.born < 300 && p.owner) {
+          if (p.owner instanceof THREE.Camera) {
+             // Camera has no mesh for envHits to catch, but we check if it hits any agent part of owner team
+             // Actually environmentGroup doesn't contain agents, so envHits only hits walls/floors.
+          } else {
+             p.owner.traverse(child => { if (child === envHits[0].object) isOwnerHit = true; });
+          }
+       }
+
+       if (!isOwnerHit) {
+          // Bouncing physics: Grenades bounce off environment until fuse expires
+          const hit = envHits[0];
+          const normal = hit.face.normal.clone();
+          if (hit.object.matrixWorld) normal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+          
+          // Reflect and dampen velocity
+          p.velocity.reflect(normal).multiplyScalar(0.6); 
+          p.bounces++;
+          
+          // Prevent getting stuck in floor
+          p.mesh.position.add(normal.multiplyScalar(0.1));
+       }
+    }
+
+    let exploded = false;
+    // Explode on direct contact with hostiles
+    for (let j = 0; j < agents.length; j++) {
+       const ag = agents[j];
+       if (ag.health > 0 && ag.team !== p.team && p.mesh.position.distanceTo(ag.mesh.position) < 1.5) {
+          exploded = true;
+          detonateGrenade(p, p.mesh.position);
+          break;
+       }
+    }
+    
+    // Only detonate on player if it's an enemy grenade
+    if (!exploded && p.team !== 0 && p.mesh.position.distanceTo(camera.position) < 1.5) {
+       exploded = true;
+       detonateGrenade(p, p.mesh.position);
+    }
+
+    // Explode on fuse
+    if (!exploded && now - p.born > p.fuse) {
+       exploded = true;
+       detonateGrenade(p, p.mesh.position);
+    }
+
+    if (exploded) {
+       scene.remove(p.mesh);
+       activeProjectiles.splice(i, 1);
+    }
+  }
+}
+
+function detonateGrenade(p, impactPoint) {
+  // Damage Loop with Team Immunity
+  const pDist = camera.position.distanceTo(impactPoint);
+  // Remove self-damage for team 0 (player)
+  if (p.team !== 0 && pDist < p.blastRadius) {
+     gameState.health -= p.damage * (1 - (pDist / p.blastRadius));
+  }
+  
+  for (let i = 0; i < agents.length; i++) {
+     const ag = agents[i];
+     if (ag.health <= 0) continue;
+     // Friendly fire protection (team based)
+     if (ag.team === p.team) continue;
+
+     const d = ag.mesh.position.distanceTo(impactPoint);
+     if (d < p.blastRadius) {
+        ag.health -= p.damage * (1 - (d / p.blastRadius));
+        if (ag.health <= 0) gameState.score += 100;
+     }
+  }
+
+  // Visuals
+  const expGeo = new THREE.SphereGeometry(1, 12, 12);
+  const expMat = new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0.8 });
+  const expMesh = new THREE.Mesh(expGeo, expMat);
+  expMesh.position.copy(impactPoint);
+  scene.add(expMesh);
+  explosions.push({ mesh: expMesh, born: Date.now(), maxScale: p.blastRadius * 0.7 });
+}
+
+function updateExplosions(delta) {
+  const now = Date.now();
+  for (let i = explosions.length - 1; i >= 0; i--) {
+     const e = explosions[i];
+     const age = now - e.born;
+     if (age > 400) {
+        scene.remove(e.mesh);
+        explosions.splice(i, 1);
+     } else {
+        const t = age / 400;
+        const s = 1 + t * e.maxScale;
+        e.mesh.scale.set(s, s, s);
+        e.mesh.material.opacity = (1 - t) * 0.8;
+     }
+  }
+}
