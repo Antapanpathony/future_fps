@@ -782,6 +782,12 @@ class Agent {
     this.clonedSniper = JSON.parse(JSON.stringify(weapons.sniper));
     this.clonedShotgun = JSON.parse(JSON.stringify(weapons.shotgun));
     this.weapon = this.primaryWeapon;
+    
+    // Perception State
+    this.isAlert = false;
+    this.alertTimer = 0;
+    this.visibilityThreshold = 150; // default
+    this.lastTargetPos = null;
 
     const shellMat = team === 0 ? matAllyShell : matEnemyShell;
     const coreMat = team === 0 ? matAllyCore : matEnemyCore;
@@ -906,17 +912,53 @@ class Agent {
         else this.weapon = this.primaryWeapon;
       }
 
-      // Check Line of Sight (LOS)
+      // Fair Perception Logic (FOV & Fog)
+      const fogDensity = (scene.fog && scene.fog.density) ? scene.fog.density : 0.01;
+      // visibilityThreshold: where visibility drops below ~10% (1.0 / density * 2.3)
+      this.visibilityThreshold = 2.3 / Math.max(0.005, fogDensity); 
+      
       let hasLOS = true;
+      let isVisible = false;
       const eyeLevel = this.mesh.position.clone().add(new THREE.Vector3(0, 1.5, 0));
       const dirToTarget = new THREE.Vector3().subVectors(closestHostile.position, eyeLevel).normalize();
-      const losRay = new THREE.Raycaster(eyeLevel, dirToTarget);
-      const losHits = losRay.intersectObjects(environmentGroup.children, true);
-      for (let i = 0; i < losHits.length; i++) {
-         if (losHits[i].object.userData.isSolid && losHits[i].distance < minDist) {
-            hasLOS = false;
-            break;
-         }
+      
+      // 1. Check Distance (Fog)
+      if (minDist < this.visibilityThreshold) {
+          // 2. Check FOV (unless already alert)
+          if (this.isAlert) {
+              isVisible = true;
+          } else {
+              const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+              const angle = forward.angleTo(dirToTarget);
+              if (angle < Math.PI / 1.5) { // 120 degree cone
+                  isVisible = true;
+              }
+          }
+      }
+
+      // 3. Check Raycast LOS
+      if (isVisible) {
+          const losRay = new THREE.Raycaster(eyeLevel, dirToTarget);
+          const losHits = losRay.intersectObjects(environmentGroup.children, true);
+          for (let i = 0; i < losHits.length; i++) {
+             if (losHits[i].object.userData.isSolid && losHits[i].distance < minDist) {
+                hasLOS = false;
+                break;
+             }
+          }
+      } else {
+          hasLOS = false;
+      }
+
+      // Alert State Update
+      if (this.alertTimer > 0) {
+          this.alertTimer -= delta * 1000;
+          if (this.alertTimer <= 0) this.isAlert = false;
+      }
+      if (hasLOS) {
+          this.isAlert = true;
+          this.alertTimer = 8000; // Keep alert for 8s after seeing someone
+          this.lastTargetPos = closestHostile.position.clone();
       }
 
       // (No random jumping - causes AI to get stuck bouncing in corners)
@@ -924,7 +966,11 @@ class Agent {
       // Movement logic
       let currentSpeed = this.speed;
       const isAiming = (this.weapon === weapons.sniper && minDist > 20);
-      let isSprinting = false;
+      isSprinting = false;
+
+      if (hasLOS) {
+          this.mesh.lookAt(closestHostile.position.x, 2.5, closestHostile.position.z);
+      }
 
       // Heavy Launcher Tactics: Strafe after firing
       const now = Date.now();
@@ -1020,6 +1066,11 @@ class Agent {
                  }
               }
            }
+        }
+
+        if (dir.lengthSq() > 0.001) {
+            const targetPos = this.mesh.position.clone().add(dir);
+            this.mesh.lookAt(targetPos.x, 2.5, targetPos.z);
         }
 
         // Apply Horizontal Collisions for Agent (Uncoupled)
@@ -1139,12 +1190,10 @@ class Agent {
                if (!blocked) { bestDir = testDir; break; }
             }
             this.stuckDir.copy(bestDir);
-         }
-      }
+       }
+    }
 
-      }
-      
-      // Decoupled Combat Logic: fire if we have LOS. LOS raycast already prevents through-wall shots.
+    // Decoupled Combat Logic: fire if we have LOS. LOS raycast already prevents through-wall shots.
       // Only suppress fire when sniping while sprinting (unrealistic), not for other weapons.
       const suppressFire = isSprinting && this.weapon.name === 'Rail-Sniper';
       if (hasLOS && !suppressFire) {
@@ -1155,7 +1204,12 @@ class Agent {
           this.shootAt(closestHostile);
         }
       }
-    } else if (this.team === 0) {
+    }
+  } else if (this.team === 0) {
+      if (this.alertTimer > 0) {
+          this.alertTimer -= delta * 1000;
+          if (this.alertTimer <= 0) this.isAlert = false;
+      }
       const distToPlayer = this.mesh.position.distanceTo(camera.position);
       if (distToPlayer > 5) {
         const dirToPlayer = new THREE.Vector3().subVectors(camera.position, this.mesh.position).normalize();
@@ -1331,6 +1385,8 @@ class Agent {
     this.health -= amount;
     this.lastHitTime = Date.now();
     this.lastHitDamage = amount;
+    this.isAlert = true;
+    this.alertTimer = 15000; // Stay high alert for 15s after taking damage
     this.shell.material.emissive.setHex(0xffffff);
     setTimeout(() => {
       if(this.shell && this.shell.material) {
@@ -1489,8 +1545,8 @@ function animate() {
       moveInput.normalize();
       const isSprinting = mapKeys['ShiftLeft'] && !isADS && !isMouseDown;
       const currentSpeed = isSprinting ? playerSpeed * 2.5 : (isADS ? playerSpeed * 0.4 : playerSpeed);
-      velocity.x += moveInput.x * currentSpeed * 10.0 * delta; 
-      velocity.z += moveInput.z * currentSpeed * 10.0 * delta;
+      velocity.x += moveInput.x * currentSpeed * delta; 
+      velocity.z += moveInput.z * currentSpeed * delta;
     }
 
     // Apply Horizontal Collisions (Independent World Axes)
