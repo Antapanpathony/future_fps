@@ -113,9 +113,21 @@ window.forceStart = function(map, mode) {
     buildEnvironment(currentMap); spawnEntities(currentGameMode);
     hasStarted = true;
     window.gameAgents = agents;
+    window.gameCamera = camera;
+    window.gameState = gameState;
+    window.gameControls = controls;
     setInterval(() => {
-       const positions = agents.map(a => `T${a.team} Z:${a.mesh.position.z.toFixed(1)} Y:${a.mesh.position.y.toFixed(1)} X:${a.mesh.position.x.toFixed(1)}`);
-       console.log('AI POSITIONS:', positions.join(' | '));
+       if (!agents.length) return;
+       const a = agents[0];
+       const dist = a.mesh.position.distanceTo(camera.position).toFixed(1);
+       // Quick LOS test
+       const eye = a.mesh.position.clone(); eye.y += 1.5;
+       const dirToCam = new THREE.Vector3().subVectors(camera.position, eye).normalize();
+       const ray = new THREE.Raycaster(eye, dirToCam);
+       const hits = ray.intersectObjects(environmentGroup.children, true);
+       let blocked = false;
+       for (let h of hits) { if (h.object.userData.isSolid && h.distance < parseFloat(dist)) { blocked = true; break; } }
+       console.log(`AI: wpn=${a.weapon?.name} dist=${dist} hasLOS=${!blocked} pos=Y${a.mesh.position.y.toFixed(1)},Z${a.mesh.position.z.toFixed(1)} playerY=${camera.position.y.toFixed(1)},Z=${camera.position.z.toFixed(1)}`);
     }, 2000);
   }
   gameState.isPaused = false;
@@ -250,8 +262,12 @@ function buildEnvironment(mapType) {
         rock.userData.isSolid = true;
         environmentGroup.add(rock);
     }
+  } else if (mapType === 'city') {
+    scene.fog.density = 0.015; // Tight urban streets
+  } else if (mapType === 'nest') {
+    scene.fog.density = 0.006; // Must see across the sniper field
   } else {
-    scene.fog.density = 0.015; // Standard for cities/nests
+    scene.fog.density = 0.010;
   }
 
   if (mapType === 'city') {
@@ -365,44 +381,64 @@ const weapons = {
   pistol: {
     name: 'Laser Pistol',
     color: 0x00ffff,
-    fireRate: 200, // Faster
-    damage: 30,    // Buff
+    fireRate: 200,
+    damage: 30,
     lastFired: 0,
     rays: 1,
     spread: 0,
-    zoomFov: 55
+    zoomFov: 55,
+    ammo: 15,
+    maxAmmo: 15,
+    reserveAmmo: 90,   // 6 extra reloads
+    reloadTime: 1000,
+    isReloading: false
   },
   rifle: {
     name: 'Plasma Auto-Rifle',
     color: 0xff00ff,
-    fireRate: 90,  // Faster
-    damage: 15,    // Buff
+    fireRate: 90,
+    damage: 15,
     lastFired: 0,
     rays: 1,
     spread: 0.005, 
-    zoomFov: 45
+    zoomFov: 45,
+    ammo: 30,
+    maxAmmo: 30,
+    reserveAmmo: 210,  // 7 extra reloads
+    reloadTime: 1500,
+    isReloading: false
   },
   shotgun: {
     name: 'Scatter Gun',
     color: 0xffaa00,
-    fireRate: 600, 
-    damage: 8,     // Buff
+    fireRate: 600,
+    damage: 8,
     lastFired: 0,
-    rays: 15,      
+    rays: 15,
     spread: 0.10, 
     zoomFov: 65,
-    piercing: false
+    piercing: false,
+    ammo: 8,
+    maxAmmo: 8,
+    reserveAmmo: 48,   // 6 extra reloads
+    reloadTime: 2000,
+    isReloading: false
   },
   sniper: {
     name: 'Rail-Sniper',
     color: 0x00ff00,
-    fireRate: 1200, 
-    damage: 65,    // Nerf (Two-shot kills mostly)
+    fireRate: 1200,
+    damage: 65,
     lastFired: 0,
     rays: 1,
     spread: 0,
     zoomFov: 15,
-    piercing: false
+    piercing: false,
+    ammo: 5,
+    maxAmmo: 5,
+    reserveAmmo: 25,   // 5 extra reloads
+    reloadTime: 2500,
+    isReloading: false
   },
   launcher: {
     name: 'Grenade Launcher',
@@ -411,9 +447,14 @@ const weapons = {
     damage: 80,
     lastFired: 0,
     isProjectile: true,
-    blastRadius: 15,
-    speed: 40,
-    zoomFov: 60
+    blastRadius: 12,
+    speed: 60,
+    zoomFov: 60,
+    ammo: 4,
+    maxAmmo: 4,
+    reserveAmmo: 20,
+    reloadTime: 3000,
+    isReloading: false
   }
 };
 let currentWeapon = weapons.pistol;
@@ -508,12 +549,50 @@ document.addEventListener('mouseup', (event) => {
   if (event.button === 2) isADS = false;
 });
 
+function startReload(weapon) {
+  if (weapon.isReloading) return;
+  if (weapon.ammo === weapon.maxAmmo) return;
+  if (weapon.reserveAmmo <= 0) return; // Out of reserve — can't reload
+
+  weapon.isReloading = true;
+  const ammoEl = document.getElementById('ammo-val');
+  if (ammoEl) {
+    ammoEl.style.color = '#ffaa00';
+    ammoEl.style.textShadow = '0 0 12px #ffaa00';
+    ammoEl.innerText = 'RELOADING...';
+  }
+  setTimeout(() => {
+    const needed = weapon.maxAmmo - weapon.ammo;
+    const drawn  = Math.min(needed, weapon.reserveAmmo);
+    weapon.ammo        += drawn;
+    weapon.reserveAmmo -= drawn;
+    weapon.isReloading  = false;
+    // Flash green on complete
+    if (ammoEl) {
+      ammoEl.style.color = '#00ff88';
+      ammoEl.style.textShadow = '0 0 12px #00ff88';
+      setTimeout(() => { ammoEl.style.color = ''; ammoEl.style.textShadow = ''; }, 400);
+    }
+  }, weapon.reloadTime);
+}
+
 function shoot() {
   if (mapKeys['ShiftLeft'] && !isADS) return; // Cannot shoot while sprinting
+  if (currentWeapon.isReloading) return;       // Busy reloading
+  if (currentWeapon.ammo <= 0) {
+    startReload(currentWeapon);
+    return;
+  }
 
   const now = Date.now();
   if (now - currentWeapon.lastFired < currentWeapon.fireRate) return;
   currentWeapon.lastFired = now;
+
+  // Decrement ammo
+  currentWeapon.ammo--;
+  if (currentWeapon.ammo === 0) {
+    startReload(currentWeapon);
+  }
 
   // Add recoil animation
   gunGroup.rotation.x = Math.max(gunGroup.rotation.x + 0.1, 0.3);
@@ -684,44 +763,62 @@ const matAllyCore = new THREE.MeshStandardMaterial({
 class Agent {
   constructor(x, z, team) {
     this.team = team;
-    this.mesh = new THREE.Group(); 
-    
+    this.mesh = new THREE.Group();
+
+    // Assign weapon FIRST so visual checks below can use it
+    this.health = 200 * difficultyMult;
+    this.speed = (team === 0 ? 4 : 3) * difficultyMult;
+    this.baseDamage = 10 * difficultyMult;
+    this.lastFired = 0;
+    this.velocityY = 0;
+    this.stuckTimer = 0;
+    this.stuckDir = new THREE.Vector3();
+    this.nestBaseZ = team === 0 ? 76 : -76;
+    this.nestTargetZ = team === 0 ? 104 : -104;
+
+    const weaponList = Object.values(weapons).filter(w => !w.isProjectile);
+    this.primaryWeapon = JSON.parse(JSON.stringify(weaponList[Math.floor(Math.random() * weaponList.length)]));
+    // Also pre-clone a sniper and shotgun for range-based switching (avoids sharing player's state)
+    this.clonedSniper = JSON.parse(JSON.stringify(weapons.sniper));
+    this.clonedShotgun = JSON.parse(JSON.stringify(weapons.shotgun));
+    this.weapon = this.primaryWeapon;
+
     const shellMat = team === 0 ? matAllyShell : matEnemyShell;
     const coreMat = team === 0 ? matAllyCore : matEnemyCore;
-
     const shell = new THREE.Mesh(agentGeometry, shellMat.clone());
     const core = new THREE.Mesh(coreGeo, coreMat.clone());
     this.mesh.add(shell);
     this.mesh.add(core);
-    this.shell = shell; 
+    this.shell = shell;
     this.core = core;
 
-    // Apply Visual Class Differentiation
-    if (this.primaryWeapon === weapons.launcher) {
-       this.mesh.scale.set(1.3, 1.3, 1.3); // Heavy
+    // Visual Class Differentiation (weapon is now assigned above)
+    const isLauncher = this.primaryWeapon.name === 'Grenade Launcher';
+    const isSniper   = this.primaryWeapon.name === 'Rail-Sniper';
+    const isShotgun  = this.primaryWeapon.name === 'Scatter Gun';
+    if (isLauncher) {
+       this.mesh.scale.set(1.3, 1.3, 1.3);
        shell.material.color.setHex(0xffaa00);
        shell.material.emissive.setHex(0xffaa00);
        core.material.color.setHex(0xff0000);
        core.material.emissive.setHex(0xff0000);
-    } else if (this.primaryWeapon === weapons.sniper) {
-       this.mesh.scale.set(0.8, 1.2, 0.8); // Slim Sniper
+    } else if (isSniper) {
+       this.mesh.scale.set(0.8, 1.2, 0.8);
        shell.material.color.setHex(0x00ff00);
        shell.material.emissive.setHex(0x00ff00);
        core.material.color.setHex(0xccff00);
        core.material.emissive.setHex(0xccff00);
-    } else if (this.primaryWeapon === weapons.shotgun) {
-       this.mesh.scale.set(1.1, 0.9, 1.1); // Bulky Breacher
+    } else if (isShotgun) {
+       this.mesh.scale.set(1.1, 0.9, 1.1);
        shell.material.color.setHex(0x0088ff);
        shell.material.emissive.setHex(0x0088ff);
        core.material.color.setHex(0x00ffff);
        core.material.emissive.setHex(0x00ffff);
     }
 
-    this.mesh.position.set(x, 2.5, z); 
-    
+    this.mesh.position.set(x, 2.5, z);
     const lightColor = team === 0 ? 0x0055ff : 0xff0055;
-    if (this.primaryWeapon === weapons.launcher) {
-       // Stronger light for heavies
+    if (isLauncher) {
        const agentLight = new THREE.PointLight(0xffaa00, 3, 15);
        this.mesh.add(agentLight);
     } else {
@@ -731,23 +828,6 @@ class Agent {
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     scene.add(this.mesh);
-    
-    // Buffed health and reduced speed to force a slower, more tactical methodical pace
-    this.health = 200 * difficultyMult;
-    this.speed = (team === 0 ? 4 : 3) * difficultyMult; 
-    this.baseDamage = 10 * difficultyMult;
-    this.lastFired = 0;
-    // Assign a random weapon (now including Sniper and Launcher)
-    const weaponList = Object.values(weapons);
-    this.primaryWeapon = weaponList[Math.floor(Math.random() * weaponList.length)];
-    this.weapon = this.primaryWeapon;
-    this.velocityY = 0;
-    this.stuckTimer = 0;
-    this.stuckDir = new THREE.Vector3();
-    
-    // Proactive behavior state for Sniper Nest (Matched to ramp geometry)
-    this.nestBaseZ = team === 0 ? 76 : -76; 
-    this.nestTargetZ = team === 0 ? 104 : -104; 
   }
 
   update(delta) {
@@ -756,10 +836,13 @@ class Agent {
     const ax = this.mesh.position.x;
     const az = this.mesh.position.z;
     const ay = this.mesh.position.y;
+    const agentFeet = ay - 2.0; // feet of the agent capsule
+    const agentStep = currentMap === 'nest' ? 2.0 : 0.6;
     for (let i = 0; i < collidableBoxes.length; i++) {
        const box = collidableBoxes[i];
        if (ax > box.min.x - 0.8 && ax < box.max.x + 0.8 && az > box.min.z - 0.8 && az < box.max.z + 0.8) {
-          if (box.max.y <= ay + 1.0 && box.max.y > agentFloorY) {
+          // Only count this box as the floor if it is no higher than one step above the agent's feet
+          if (box.max.y <= agentFeet + agentStep + 0.1 && box.max.y > agentFloorY) {
              agentFloorY = box.max.y;
           }
        }
@@ -811,15 +894,16 @@ class Agent {
     }
 
     if (closestHostile) {
-      // Smart Weapon Switch: Only switch if not a specialized Heavy (Launcher)
-      if (this.primaryWeapon !== weapons.launcher) {
-        if (minDist > 35) this.weapon = weapons.sniper; 
-        else if (minDist < 8) this.weapon = weapons.shotgun;
+      // Smart Weapon Switch: use agent's own cloned weapons, not the player's global objects
+      const isHeavy = this.primaryWeapon.name === 'Grenade Launcher';
+      if (!isHeavy) {
+        if (minDist > 35) this.weapon = this.clonedSniper;
+        else if (minDist < 8) this.weapon = this.clonedShotgun;
         else this.weapon = this.primaryWeapon;
       } else {
-        // Heavy bots might switch to a sidearm if the enemy is literally on top of them
-        if (minDist < 5) this.weapon = weapons.pistol;
-        else this.weapon = weapons.launcher;
+        // Heavy bots switch to their primary if enemy is not right on top of them
+        if (minDist < 5) this.weapon = this.clonedSniper; // use sniper as sidearm
+        else this.weapon = this.primaryWeapon;
       }
 
       // Check Line of Sight (LOS)
@@ -1060,11 +1144,12 @@ class Agent {
 
       }
       
-      // Decoupled Combat Logic: Always attempt to shoot if target is visible and not sprinting
-      if (hasLOS && !isSprinting) {
+      // Decoupled Combat Logic: fire if we have LOS. LOS raycast already prevents through-wall shots.
+      // Only suppress fire when sniping while sprinting (unrealistic), not for other weapons.
+      const suppressFire = isSprinting && this.weapon.name === 'Rail-Sniper';
+      if (hasLOS && !suppressFire) {
         const now = Date.now();
-        // Massively slow down AI fire rates to prevent instant cross-map wipes and enforce a slower pace
-        const rateMult = this.team === 0 ? 3.0 : 3.5; 
+        const rateMult = this.team === 0 ? 1.5 : 2.0;
         if (now - this.lastFired > this.weapon.fireRate * rateMult) {
           this.lastFired = now;
           this.shootAt(closestHostile);
@@ -1177,7 +1262,7 @@ class Agent {
           blastRadius: this.weapon.blastRadius,
           born: Date.now(),
           bounces: 0,
-          fuse: 2500 
+          fuse: 2800 
        });
        return;
     }
@@ -1202,15 +1287,16 @@ class Agent {
        scene.add(laser);
        lasers.push({ mesh: laser, born: Date.now() });
 
-       // Damage check — raycast from agent to see if it actually hits the target
+       // Damage check — raycast from EYE LEVEL (matches LOS check origin) to avoid terrain false-blocks
        const ray = new THREE.Raycaster();
-       const dir = new THREE.Vector3().subVectors(aimPoint, this.mesh.position).normalize();
-       ray.set(this.mesh.position, dir);
+       const eyePos = this.mesh.position.clone(); eyePos.y += 1.5;
+       const dir = new THREE.Vector3().subVectors(aimPoint, eyePos).normalize();
+       ray.set(eyePos, dir);
 
        // Physical wall-hack prevention: perfectly ensure the laser doesn't clip through an intermediate object
        let hitWall = false;
        const envHits = ray.intersectObjects(environmentGroup.children, true);
-       const maxDist = this.mesh.position.distanceTo(aimPoint);
+       const maxDist = eyePos.distanceTo(aimPoint);
        for (let i = 0; i < envHits.length; i++) {
           if (envHits[i].object.userData.isSolid && envHits[i].distance < maxDist) {
              hitWall = true; break;
@@ -1218,9 +1304,10 @@ class Agent {
        }
 
        if (target.isPlayer) {
+         // Full body hitbox: foot level to slightly above head
          const playerBox = new THREE.Box3(
-           new THREE.Vector3(camera.position.x - 0.5, camera.position.y - 1.6, camera.position.z - 0.5),
-           new THREE.Vector3(camera.position.x + 0.5, camera.position.y + 0.4, camera.position.z + 0.5)
+           new THREE.Vector3(camera.position.x - 0.5, camera.position.y - 1.8, camera.position.z - 0.5),
+           new THREE.Vector3(camera.position.x + 0.5, camera.position.y + 0.5, camera.position.z + 0.5)
          );
          if (ray.ray.intersectsBox(playerBox) && !hitWall) {
             const finalDamage = (this.weapon.damage * 0.5) * difficultyMult;
@@ -1315,28 +1402,25 @@ function spawnEntities(mode) {
     ));
   }
 
-  // Force at least one "Grenadier" role per team if agents exist
+  // Force at least one "Grenadier" role per team in team modes only (not solo duel)
   let foundAllyGrenadier = false;
   let foundEnemyGrenadier = false;
   
-  // In solo mode, the first enemy is ALWAYS a Heavy with a launcher
-  if (mode === 'solo' && agents.length > 0) {
-     agents[0].primaryWeapon = weapons.launcher;
-     agents[0].weapon = weapons.launcher;
-     foundEnemyGrenadier = true;
-  }
-
-  for (let i = 0; i < agents.length; i++) {
-     if (agents[i].team === 0 && !foundAllyGrenadier) {
-        agents[i].primaryWeapon = weapons.launcher;
-        agents[i].weapon = weapons.launcher;
-        foundAllyGrenadier = true;
-     }
-     if (agents[i].team === 1 && !foundEnemyGrenadier) {
-        agents[i].primaryWeapon = weapons.launcher;
-        agents[i].weapon = weapons.launcher;
-        foundEnemyGrenadier = true;
-     }
+  // In solo mode or Sniper Nest skip the forced grenadier 
+  // (Nest is too long range for grenades to be effective, solo is just annoying with only grenades)
+  if (mode !== 'solo' && currentMap !== 'nest') {
+    for (let i = 0; i < agents.length; i++) {
+       if (agents[i].team === 0 && !foundAllyGrenadier) {
+          agents[i].primaryWeapon = JSON.parse(JSON.stringify(weapons.launcher));
+          agents[i].weapon = agents[i].primaryWeapon;
+          foundAllyGrenadier = true;
+       }
+       if (agents[i].team === 1 && !foundEnemyGrenadier) {
+          agents[i].primaryWeapon = JSON.parse(JSON.stringify(weapons.launcher));
+          agents[i].weapon = agents[i].primaryWeapon;
+          foundEnemyGrenadier = true;
+       }
+    }
   }
 }
 
@@ -1352,6 +1436,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Digit3') switchWeapon('shotgun');
     if (e.code === 'Digit4') switchWeapon('sniper');
     if (e.code === 'Digit5') switchWeapon('launcher');
+    if (e.code === 'KeyR') startReload(currentWeapon);
     if (e.code === 'Space' && canJump) {
       velocity.y += 100; // Floaty jump speed (lower than 180)
       canJump = false;
@@ -1381,32 +1466,44 @@ function animate() {
   camera.updateProjectionMatrix();
 
   if (!gameState.isPaused && controls.isLocked) {
-    // Movement logic with damping
+    // Movement logic with damping (World Space)
     velocity.x -= velocity.x * 10.0 * delta;
     velocity.z -= velocity.z * 10.0 * delta;
     velocity.y -= gravity * delta; // Gravity
 
-    // Fixed WASD directions
-    direction.z = Number(mapKeys['KeyW'] || mapKeys['ArrowUp'] || false) - Number(mapKeys['KeyS'] || mapKeys['ArrowDown'] || false);
-    direction.x = Number(mapKeys['KeyD'] || mapKeys['ArrowRight'] || false) - Number(mapKeys['KeyA'] || mapKeys['ArrowLeft'] || false);
-    direction.normalize();
+    // Calculate World Space direction from camera orientation
+    const lookDir = new THREE.Vector3();
+    camera.getWorldDirection(lookDir);
+    lookDir.y = 0; lookDir.normalize();
+    const rightDir = new THREE.Vector3();
+    rightDir.crossVectors(camera.up, lookDir).negate(); 
 
-    const isSprinting = mapKeys['ShiftLeft'] && !isADS && !isMouseDown;
-    const currentSpeed = isSprinting ? playerSpeed * 2.5 : (isADS ? playerSpeed * 0.4 : playerSpeed);
+    // Sum input forces
+    const moveInput = new THREE.Vector3(0, 0, 0);
+    if (mapKeys['KeyW'] || mapKeys['ArrowUp']) moveInput.add(lookDir);
+    if (mapKeys['KeyS'] || mapKeys['ArrowDown']) moveInput.sub(lookDir);
+    if (mapKeys['KeyD'] || mapKeys['ArrowRight']) moveInput.add(rightDir);
+    if (mapKeys['KeyA'] || mapKeys['ArrowLeft']) moveInput.sub(rightDir);
+    
+    if (moveInput.lengthSq() > 0) {
+      moveInput.normalize();
+      const isSprinting = mapKeys['ShiftLeft'] && !isADS && !isMouseDown;
+      const currentSpeed = isSprinting ? playerSpeed * 2.5 : (isADS ? playerSpeed * 0.4 : playerSpeed);
+      velocity.x += moveInput.x * currentSpeed * 10.0 * delta; 
+      velocity.z += moveInput.z * currentSpeed * 10.0 * delta;
+    }
 
-    if (mapKeys['KeyW'] || mapKeys['ArrowUp'] || mapKeys['KeyS'] || mapKeys['ArrowDown']) velocity.z -= direction.z * currentSpeed * delta;
-    if (mapKeys['KeyA'] || mapKeys['ArrowLeft'] || mapKeys['KeyD'] || mapKeys['ArrowRight']) velocity.x -= direction.x * currentSpeed * delta;
-
-    // Apply Horizontal Collisions (Decoupled axes — prevents teleporting through corners)
+    // Apply Horizontal Collisions (Independent World Axes)
     const oldX = camera.position.x;
     const oldZ = camera.position.z;
     const pMinY = camera.position.y - 1.6; // feet
     const pMaxY = camera.position.y + 0.2; // head
+    const maxStepUp = currentMap === 'nest' ? 1.2 : 0.5;
 
-    // Step X first
-    const maxStepUp = currentMap === 'nest' ? 1.5 : 0.5;
-    controls.moveRight(-velocity.x * delta);
+    // Step World X 
+    camera.position.x += velocity.x * delta;
     const newX = camera.position.x;
+
     for (let i = 0; i < collidableBoxes.length; i++) {
        const box = collidableBoxes[i];
        if (pMinY < box.max.y && pMaxY > box.min.y) {
@@ -1414,11 +1511,12 @@ function animate() {
               oldZ > box.min.z - 0.4 && oldZ < box.max.z + 0.4) {
              const stepUp = box.max.y - pMinY;
              if (stepUp > 0 && stepUp <= maxStepUp) {
-                // Valid step, do not block X movement
+                continue;
              } else {
                 camera.position.x = oldX;
+                velocity.x = 0;
+                break;
              }
-             break;
           }
        }
     }
@@ -1430,19 +1528,18 @@ function animate() {
        const otherMinY = other.mesh.position.y - 1.0;
        const otherMaxY = other.mesh.position.y + 1.5;
        if (pMinY < otherMaxY && pMaxY > otherMinY) {
-          if (Math.abs(newX - other.mesh.position.x) < 0.9 && Math.abs(oldZ - other.mesh.position.z) < 0.9) {
-             camera.position.x = oldX; break;
+          if (Math.abs(camera.position.x - other.mesh.position.x) < 0.9 && Math.abs(oldZ - other.mesh.position.z) < 0.9) {
+             camera.position.x = oldX; velocity.x = 0; break;
           }
        }
     }
 
-    // Recompute after possible X step-up
+    // Step World Z
+    camera.position.z += velocity.z * delta;
+    const newZ = camera.position.z;
     const pMinY2 = camera.position.y - 1.6;
     const pMaxY2 = camera.position.y + 0.2;
 
-    // Step Z second
-    controls.moveForward(-velocity.z * delta);
-    const newZ = camera.position.z;
     for (let i = 0; i < collidableBoxes.length; i++) {
        const box = collidableBoxes[i];
        if (pMinY2 < box.max.y && pMaxY2 > box.min.y) {
@@ -1450,11 +1547,12 @@ function animate() {
               newZ > box.min.z - 0.4 && newZ < box.max.z + 0.4) {
              const stepUp = box.max.y - pMinY2;
              if (stepUp > 0 && stepUp <= maxStepUp) {
-                // Valid step, do not block Z movement
+                continue;
              } else {
                 camera.position.z = oldZ;
+                velocity.z = 0;
+                break;
              }
-             break;
           }
        }
     }
@@ -1466,8 +1564,8 @@ function animate() {
        const otherMinY = other.mesh.position.y - 1.0;
        const otherMaxY = other.mesh.position.y + 1.5;
        if (pMinY2 < otherMaxY && pMaxY2 > otherMinY) {
-          if (Math.abs(camera.position.x - other.mesh.position.x) < 0.9 && Math.abs(newZ - other.mesh.position.z) < 0.9) {
-             camera.position.z = oldZ; break;
+          if (Math.abs(camera.position.x - other.mesh.position.x) < 0.9 && Math.abs(camera.position.z - other.mesh.position.z) < 0.9) {
+             camera.position.z = oldZ; velocity.z = 0; break;
           }
        }
     }
@@ -1477,11 +1575,12 @@ function animate() {
     const px = camera.position.x;
     const pz = camera.position.z;
     const py = camera.position.y;
+    const pFeet = py - 1.6;
     for (let i = 0; i < collidableBoxes.length; i++) {
        const box = collidableBoxes[i];
        if (px > box.min.x - 0.4 && px < box.max.x + 0.4 && pz > box.min.z - 0.4 && pz < box.max.z + 0.4) {
-          // Add +1.0 buffer to strictly capture fast falling player instances
-          if (box.max.y <= py + 1.0 && box.max.y > floorHeight) {
+          // Only snap floorHeight if the box top is not higher than our current feet + maxStepUp
+          if (box.max.y <= pFeet + maxStepUp + 0.1 && box.max.y > floorHeight) {
              floorHeight = box.max.y;
           }
        }
@@ -1587,6 +1686,26 @@ function animate() {
   document.getElementById('weapon-val').innerText = wStr;
   document.getElementById('weapon-val').style.color = '#' + currentWeapon.color.toString(16).padStart(6, '0');
   document.getElementById('weapon-val').style.textShadow = '0 0 10px #' + currentWeapon.color.toString(16).padStart(6, '0');
+
+  // Ammo HUD
+  const ammoEl = document.getElementById('ammo-val');
+  if (ammoEl && !currentWeapon.isReloading) {
+    const hexColor = '#' + currentWeapon.color.toString(16).padStart(6, '0');
+    const ammoRatio = currentWeapon.ammo / currentWeapon.maxAmmo;
+    let magColor;
+    if (ammoRatio <= 0)        { magColor = 'var(--danger-glow)'; }
+    else if (ammoRatio <= 0.25){ magColor = '#ffaa00'; }
+    else                        { magColor = hexColor; }
+
+    const reserveColor = currentWeapon.reserveAmmo <= 0
+      ? 'var(--danger-glow)'
+      : (currentWeapon.reserveAmmo <= currentWeapon.maxAmmo ? '#ffaa00' : '#aaaaaa');
+
+    ammoEl.innerHTML =
+      `<span style="color:${magColor};text-shadow:0 0 10px ${magColor}">${currentWeapon.ammo}</span>` +
+      `<span style="color:#444;font-size:0.85em"> / </span>` +
+      `<span style="color:${reserveColor};font-size:0.85em">${currentWeapon.reserveAmmo}</span>`;
+  }
 
   // Game Over logic
   if (gameState.health <= 0 && controls.isLocked) {
